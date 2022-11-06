@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -7,11 +8,12 @@ use std::str;
 
 use nom::IResult;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take};
+use nom::error::ErrorKind;
 use nom::number::Endianness;
-use nom::number::complete::{u16, u32, u64, u8};
+use nom::number::complete::{u16, u32, u64};
 use nom::sequence::{pair, tuple};
-use strum_macros::{Display, FromRepr};
+use strum_macros::{Display as DDisplay, FromRepr};
 use tags::Tag;
 
 mod tags;
@@ -68,27 +70,6 @@ fn initial_parse(i: &[u8]) -> IResult<&[u8], (TifInfo, u64)> {
 
 }
 
-// fn read_ifd_count<'a>(file_offset: u64, file: &File, info: &'a TifInfo) -> Result<u64, Box<dyn std::error::Error>> {
-//
-
-// fn read_ifd_count<'a, 'b>(file_offset: u64, file: &mut File, info: &'a TifInfo) -> IResult<&'a[u8], u64> {
-//     file.seek(SeekFrom::Start(file_offset)).expect("Reading IFD count from file failed!");
-//     let mut buf = [0u8; 8];
-// {
-
-//     let (_, count) = if info.big {
-//         file.read_exact(&mut buf).expect("Reading IFD count from file failed!");
-//         alt((u64(info.endianess), fail::<_, u64, _>))(&buf[..])?
-//     } else {
-//         let mut handle = file.take(2);
-//         handle.read(&mut buf).expect("Reading IFD count from file failed!");
-//         let (remainder, count) = alt((u16(info.endianess), fail::<_, u16, _>))(&buf[..])?;
-//         (remainder, count as u64)
-//     };
-//     Ok((&b""[..], count.clone()))
-//     }
-// }
-
 fn first_ifd_count<'a>(i: &'a[u8], info: &TifInfo) -> IResult<&'a[u8], u64> {
     let result = if info.big {
         u64(info.endianess)(i)?
@@ -98,12 +79,6 @@ fn first_ifd_count<'a>(i: &'a[u8], info: &TifInfo) -> IResult<&'a[u8], u64> {
     };
 
     Ok(result)
-}
-
-#[derive(Debug, PartialEq)]
-enum IfdEntryData {
-    Value((u8, u8, u8, u8)),
-    Reference(u32),
 }
 
 #[derive(Debug, FromRepr, PartialEq)]
@@ -117,14 +92,21 @@ enum IfdEntryValue {
 }
 
 #[derive(Debug, PartialEq)]
-struct IfdEntry {
-    tag: Tag,
+struct IfdEntry<'a> {
+    tag_id: u64,
     type_: EntryType,
     count: u64,
-    data: IfdEntryData,
+    data: IfdEntryData<'a>,
+    endian: &'a Endianness,
 }
 
-#[derive(Debug, Display, FromRepr, PartialEq)]
+#[derive(Debug, PartialEq)]
+enum IfdEntryData<'a> {
+    Value(&'a[u8]),
+    Reference(u32),
+}
+
+#[derive(Debug, DDisplay, FromRepr, PartialEq)]
 #[repr(u16)]
 enum EntryType {
     Byte = 1,
@@ -141,10 +123,15 @@ enum EntryType {
     Double,
 }
 
-fn parse_ifd_tag<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], Option<Tag>> {
+fn parse_ifd_id<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], u64> {
     let (remainder, tag_number) = u16(*endian)(i)?;
-    let tag: Option<Tag> = tag_number.try_into().ok();
-    Ok((remainder, tag))
+    Ok((remainder, tag_number as u64))
+    // let tag: Option<Tag> = (tag_number as u64).try_into().ok();
+    // Ok((remainder, tag))
+}
+
+fn parse_ifd_tag<'a>(tag_number: u64) -> Option<Tag> {
+    tag_number.try_into().ok()
 }
 
 fn parse_entry_type<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], Option<EntryType>> {
@@ -152,54 +139,65 @@ fn parse_entry_type<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], Opt
     Ok((remainder, EntryType::from_repr(entry_type)))
 }
 
-// fn position_to_string<'a>(
-//     i: &'a [u8],
-//     endian: &Endianness,
-//     tag: &Tag,
-//     type_: &EntryType,
-//     count: u32,
-// ) -> IResult<&'a [u8], String> {
-//     unimplemented!();
-// }
+impl<'a> Display for IfdEntry<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let data_value = match self.data {
+            IfdEntryData::Value(v) => v,
+            IfdEntryData::Reference(_) => return Ok(write!(f, "Entry: {:?}", self))?,
+        };
 
-fn entry_to_string<'a>(entry: &IfdEntry) -> Option<String> {
-    let data_value = match entry.data {
-        IfdEntryData::Value(v) => v,
-        IfdEntryData::Reference(_) => return None,
-    };
-    match entry.type_ {
-        EntryType::Byte | EntryType::Ascii => {
-            let data = match str::from_utf8(data_value) {
-                Ok(v) => v,
-                Err => panic!("Invalid string value!"),
-            };
-            format!("{:?}: {:?}", entry.tag, data)
-        },
-        EntryType::Short => {
-            "".to_owned()
-            // let (remainder, data) = many_m_n(1, count as usize, u16(*endian))(i)?;
-            // format!("{:?}: {:?}", tag, data)
-        },
-        EntryType::Long => {
-            "".to_owned()
-            // let (remainder, data) = many_m_n(1, count as usize, u32(*endian))(i)?;
-            // format!("{:?}: {:?}", tag, data)
-        },
-        EntryType::Rational => {
-            "".to_owned()
-            // let (remainder, (numerator, denomenator)) = tuple((u32(*endian), u32(*endian)))(i)?;
-            // format!("{:?}: {}/{}", tag, numerator, denomenator)
-        },
-        // EntryType::Rational => 8,
-        // EntryType::SByte => 1,
-        // EntryType::Undefined => 1,
-        // EntryType::SShort => 2,
-        // EntryType::SLong => 4,
-        // EntryType::SRational => 8,
-        // EntryType::Float => 4,
-        // EntryType::Double => 8,
-        // t => format!("{:?} ({:?}): unimplemented", tag, t)
-        _ => "".to_owned()
+        let tag: Tag = match self.tag_id.try_into() {
+            Ok(t) => t,
+            Err(_) => panic!("Invalid tag! ({})", self.tag_id),
+        };
+
+        match self.type_ {
+            EntryType::Byte | EntryType::Ascii => {
+                match str::from_utf8(data_value) {
+                    Ok(data) => Ok(write!(f, "{:?} ({}): {}", tag, self.tag_id, data))?,
+                    Err(_) => panic!("Invalid string value!"),
+                }
+            },
+            EntryType::Short => {
+                match self.count {
+                    1 => {
+                        match u16::<_, (_, ErrorKind)>(*self.endian)(data_value) {
+                            Ok((_, n)) => Ok(write!(f, "{:?} ({}): {}", tag, self.tag_id, n))?,
+                            Err(_) => panic!("{:?}: Erroneous Short value!", tag),
+                        }
+                    },
+                    2 => {
+                        match tuple::<_, _, (_, ErrorKind), _>((u16(*self.endian), u16(*self.endian)))(data_value) {
+                            Ok((_, (m, n))) => Ok(write!(f, "{:?} ({}): {}, {}", tag, self.tag_id, m, n))?,
+                            Err(_) => panic!("{:?}: Erroneous Short value!", tag),
+                        }
+                    },
+                    _ => panic!("{:?}: Too many entries of Short values!", tag)
+
+                }
+            },
+            EntryType::Long => {
+                match u32::<_, (_, ErrorKind)>(*self.endian)(data_value) {
+                    Ok((_, n)) => Ok(write!(f, "{:?} ({}): {}", tag, self.tag_id, n))?,
+                    Err(_) => panic!("{:?}: Erroneous Short value!", tag),
+                }
+            },
+            EntryType::Rational => {
+                Ok(write!(f, "{:?}: Rational", tag))?
+                // let (remainder, (numerator, denomenator)) = tuple((u32(*self.endian), u32(*self.endian)))(i)?;
+                // Ok(write!(f, "{:?}: {}/{}", tag, numerator, denomenator))?
+            },
+            // EntryType::Rational => 8,
+            // EntryType::SByte => 1,
+            // EntryType::Undefined => 1,
+            // EntryType::SShort => 2,
+            // EntryType::SLong => 4,
+            // EntryType::SRational => 8,
+            // EntryType::Float => 4,
+            // EntryType::Double => 8,
+            // t => Ok(write!(f, "{:?} ({:?}))?: unimplemented", tag, t)
+            _ => Ok(write!(f, "{:?}: Rational", tag))?,
+        }
     }
 }
 
@@ -217,47 +215,30 @@ fn parse_entry_data<'a>(
     endian: &Endianness,
     type_: &EntryType,
     count: u32,
-) -> IResult<&'a[u8], IfdEntryData> {
+) -> IResult<&'a[u8], IfdEntryData<'a>> {
     if (byte_width(type_) as u32 * count) > 4 {
         let (remainder, position) = u32(*endian)(i)?;
         Ok((remainder, IfdEntryData::Reference(position)))
     } else {
-        let (remainder, bytes) = tuple((u8, u8, u8, u8))(i)?;
+        let (remainder, bytes) = take(4u8)(i)?;
         Ok((remainder, IfdEntryData::Value(bytes)))
     }
 }
 
-// fn display_ifd_entry<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], Option<String>> {
-//     let (input, tag) = parse_ifd_tag(i, endian)?;
-//     let (input, entry_type) = parse_entry_type(input, endian)?;
-//     let (input, count) = u32(*endian)(input)?;
-//     match (tag, entry_type) {
-//         (Some(tag), Some(type_)) => {
-//             let (remainder, data) = parse_entry_data(input, endian, &tag, &type_, count)?;
-
-//             // if (byte_width(&type_) as u32 * count) > 4 {
-//             //     let (input, data) = position_to_string(input, endian, &tag, &type_, count)?;
-//             //     return Ok((i, IfdEntryData::Position(0)))
-//             // }
-//             // let (input, data) = entry_to_string(input, endian, &tag, &type_, count)?;
-//             // Ok((input, Some(data)))
-//         },
-//         _ => Ok((input, None)),
-//     }
-// }
-
-fn parse_ifd_entry<'a>(i: &'a[u8], endian: &Endianness) -> IResult<&'a[u8], Option<IfdEntry>> {
-    let (input, tag) = parse_ifd_tag(i, endian)?;
+fn parse_ifd_entry<'a>(i: &'a[u8], endian: &'a Endianness) -> IResult<&'a[u8], Option<IfdEntry<'a>>> {
+    let (input, tag_id) = parse_ifd_id(i, endian)?;
     let (input, entry_type) = parse_entry_type(input, endian)?;
     let (input, count) = u32(*endian)(input)?;
+    let tag: Option<Tag> = tag_id.try_into().ok();
     match (tag, entry_type) {
-        (Some(tag), Some(type_)) => {
+        (Some(_tag), Some(type_)) => {
             let (input, data) = parse_entry_data(input, endian, &type_, count)?;
             let result = IfdEntry{
-                tag,
+                tag_id,
                 type_,
                 count: count as u64,
                 data,
+                endian,
             };
             Ok((input, Some(result)))
         },
@@ -289,7 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok((_, count)) = first_ifd_count(&counter_buf, &info) {
                 dbg!(count);
 
-                if info.big {
+                if info.endianess == Endianness::Big {
                     let mut ifd_buf = [0u8; 20];
                     for _ in 0..count {
                         file.read_exact(&mut ifd_buf)?;
@@ -300,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         file.read_exact(&mut ifd_buf)?;
                         // dbg!(&ifd_buf);
                         if let Ok((_, Some(entry))) = parse_ifd_entry(&ifd_buf, &info.endianess) {
-                            dbg!(entry);
+                            println!("{}", entry);
                         }
                     }
                 };
@@ -377,10 +358,11 @@ mod tests {
             Ok((
                 &b""[..],
                 Some(IfdEntry{
-                    tag: Tag::ImageWidth,
+                    tag_id: Tag::ImageWidth as u64,
                     type_: EntryType::Byte,
                     count: 1,
-                    data: IfdEntryData::Value((0, 0, 1, 0)),
+                    data: IfdEntryData::Value(&[0, 0, 1, 0]),
+                    endian: &Endianness::Little,
                 }),
             ))
         );
