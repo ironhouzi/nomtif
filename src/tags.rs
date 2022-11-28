@@ -1,4 +1,6 @@
-use strum_macros::{Display, FromRepr};
+// use std::collections::V;
+use strum::EnumCount;
+use strum_macros::{Display, EnumCount as Count, FromRepr};
 
 macro_rules! back_to_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident {
@@ -132,8 +134,18 @@ back_to_enum! {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum TagInfoValue<T> {
+    Number(T),
+    Ascii(String),
+    Array(Vec<T>),
+}
+
+pub trait Bitfield {}
+
 pub enum TagValue {
-    NewSubfileType(u32),	 // A general indication of the kind of data contained in this subfile.
+    NewSubfileType,	 // A general indication of the kind of data contained in this subfile.
+    // SubfileType(Box<dyn Bitfield<SubfileType>>),	 // A general indication of the kind of data contained in this subfile.
     SubfileType(SubfileType),	 // A general indication of the kind of data contained in this subfile.
     ImageWidth(u32),	 // The number of columns in the image, i.e., the number of pixels per row.
     ImageLength(u32),	 // The number of rows of pixels in the image.
@@ -243,7 +255,7 @@ pub enum TagValue {
 //     fn resolve(&self) -> TagValue;
 // }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum Compression {
     Uncompressed = 1,
@@ -257,7 +269,7 @@ pub enum Compression {
     PackBits = 32773,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Display, FromRepr, PartialEq)]
 #[repr(u32)]
 enum GeoKey {
     Standard = 0,
@@ -266,7 +278,7 @@ enum GeoKey {
     TransparencyMask = 4,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum PhotometricInterpretation {
     WhiteIsZero,
@@ -277,21 +289,21 @@ pub enum PhotometricInterpretation {
     YCbCr,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum PlanarConfiguration {
     Chunky = 1,
     Planar,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum Predictor {
     None = 1,
     Horizontal,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum ResolutionUnit {
     NoAbsoluteUnit = 1,
@@ -299,7 +311,7 @@ pub enum ResolutionUnit {
     Centimeter,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum SampleFormat {
     UnsignedInteger = 1,
@@ -308,7 +320,7 @@ pub enum SampleFormat {
     Undefined,
 }
 
-#[derive(Display, FromRepr)]
+#[derive(Debug, Display, Count, FromRepr, PartialEq)]
 #[repr(u32)]
 pub enum SubfileType {
     Standard = 0,
@@ -317,7 +329,41 @@ pub enum SubfileType {
     TransparencyMask = 4,
 }
 
-#[derive(Display, FromRepr)]
+impl Bitfield for SubfileType {}
+
+pub fn print_bitfield<T: EnumCount + FromReprTrait>(value: u32, enumeration: T) -> String {
+    let mut values: Vec<T> = std::iter::repeat(1)
+        .enumerate()
+        .take(T::COUNT)
+        .map(|(n, v)| u32::pow(n as u32, v) )
+        .filter(|flag| *flag & value == *flag)
+        .map(|flag| T::from_repr(flag).expect("unexpected subfile type!"))
+        .collect();
+
+    if value == 0 {
+        values.push(enumeration.from_repr(0));
+    }
+    values.join(" ")
+}
+
+impl SubfileType {
+    pub fn new(value: u32) -> Vec<Self> {
+        let mut values: Vec<Self> = std::iter::repeat(1)
+            .enumerate()
+            .take(Self::COUNT)
+            .map(|(n, v)| u32::pow(n as u32, v) )
+            .filter(|flag| *flag & value == *flag)
+            .map(|flag| SubfileType::from_repr(flag).expect("unexpected subfile type!"))
+            .collect();
+
+        if value == 0 {
+            values.push(SubfileType::Standard);
+        }
+        values
+    }
+}
+
+#[derive(Display, FromRepr, PartialEq)]
 #[repr(u64)]
 enum ModelTypeCode {
    Projected   = 1,   /* Projection Coordinate System         */
